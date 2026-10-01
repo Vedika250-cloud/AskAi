@@ -301,3 +301,45 @@ export async function generateChatResponse(
 ): Promise<string> {
   return generateGroundedAnswer(message, [], history, 'detailed');
 }
+
+// ─── Follow-up Suggestion Generation ──────────────────────────────────────────
+
+/**
+ * Generates 2-3 short follow-up questions based on the student's question.
+ *
+ * Inexpensive: minimal prompt, no system instruction, no course context.
+ * Designed to run concurrently with the main answer stream (zero added latency).
+ * Returns [] on any error — follow-ups are non-critical UI sugar.
+ */
+export async function generateFollowups(question: string): Promise<string[]> {
+  const prompt = `A student just asked: "${question}"
+
+Suggest exactly 3 short follow-up questions they might naturally ask next about the same topic.
+Rules:
+- Each question must be under 10 words
+- Keep them academically relevant
+- Vary the angle (how / why / what / compare)
+- Return ONLY a JSON array of 3 strings, no other text
+
+Example: ["What is backpropagation?", "Why use ReLU over sigmoid?", "How does dropout help?"]`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    });
+
+    const raw = (response.text ?? '').trim();
+    const match = raw.match(/\[[\s\S]*?\]/);
+    if (!match) return [];
+
+    const parsed: unknown = JSON.parse(match[0]);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+      .slice(0, 3);
+  } catch {
+    return []; // silent — follow-ups are optional
+  }
+}

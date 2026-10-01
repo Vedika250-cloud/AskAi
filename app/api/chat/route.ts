@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { retrieveRelevantChunks } from '@/lib/retrieval';
-import { streamGroundedAnswer, generateGroundedAnswer, type AnswerMode } from '@/lib/gemini';
+import {
+  streamGroundedAnswer,
+  generateGroundedAnswer,
+  generateFollowups,
+  type AnswerMode,
+} from '@/lib/gemini';
 
 // Default RAG retrieval parameters
 const TOP_K = 3;
@@ -14,20 +19,15 @@ const VALID_MODES: AnswerMode[] = ['simple', 'detailed', 'exam', 'viva'];
  * Protocol: newline-delimited JSON over text/plain.
  * Each line is one of:
  *   {"type":"chunk","text":"..."}       — a text delta from the Gemini stream
- *   {"type":"meta","sources":[...],"found":bool,"mode":"..."} — sent once, after the stream ends
- *   {"type":"error","message":"..."}    — fatal error (stream ends immediately after)
+ *   {"type":"meta","sources":[...],"found":bool,"mode":"...","followups":["Q1","Q2","Q3"]}
+ *   {"type":"error","message":"..."}    — fatal error (stream ends after this)
  *
- * The client reads lines, accumulates chunk.text deltas into the displayed answer,
- * then uses the meta object to render the source panel.
- *
- * Fallback: If streaming itself fails (e.g. the SDK stream errors before any token),
- * the route falls back to a single non-streaming generateGroundedAnswer call and
- * emits the full answer as a single chunk followed by meta — so the client still works.
+ * Follow-up questions are generated concurrently with the main answer stream
+ * using a small separate Gemini call, adding zero perceived latency.
+ * They are included in the meta line and rendered as clickable chips by the client.
  */
 export async function POST(request: Request) {
   const encoder = new TextEncoder();
-
-  // Helper: encode one NDJSON line
   const line = (obj: object) => encoder.encode(JSON.stringify(obj) + '\n');
 
   let body: { message?: string; history?: unknown[]; mode?: string };
@@ -51,7 +51,7 @@ export async function POST(request: Request) {
     ? (history as { role: string; content: string }[])
     : [];
 
-  // ── Step 1 & 2: Embed + Retrieve (happens before streaming starts) ─────────
+  // ── Step 1 & 2: Embed + Retrieve ───────────────────────────────────────────
   let retrievalResult: {
     found: boolean;
     chunks: { source: string; page: number; similarity: number; chunk_id: string; text: string }[];
@@ -60,8 +60,8 @@ export async function POST(request: Request) {
 
   try {
     retrievalResult = await retrieveRelevantChunks(question, TOP_K, SIMILARITY_THRESHOLD);
-  } catch (retrievalErr: any) {
-    console.warn('Retrieval warning (proceeding with empty context):', retrievalErr.message);
+  } catch (retrievalErr: unknown) {
+    console.warn('Retrieval warning (proceeding with empty context):', (retrievalErr as Error).message);
     retrievalResult = { found: false, chunks: [], topScore: 0 };
   }
 
@@ -73,32 +73,29 @@ export async function POST(request: Request) {
     excerpt: chunk.text.replace(/\s+/g, ' ').trim().slice(0, 150),
   }));
 
-  const metaPayload = {
-    type: 'meta' as const,
-    sources,
-    found: retrievalResult.found,
-    topScore: retrievalResult.topScore,
-    mode: answerMode,
-  };
-
-  // ── Step 3: Stream Gemini generation ──────────────────────────────────────
+  // ── Step 3: Stream answer + generate follow-ups concurrently ───────────────
   const stream = new ReadableStream({
     async start(controller) {
+
+      // Kick off follow-up generation immediately — it runs while we stream the answer.
+      // generateFollowups() never throws; returns [] on any failure.
+      const followupsPromise = generateFollowups(question);
+
+      let streamFailed = false;
+
       try {
-        // Try streaming first
         const generator = streamGroundedAnswer(
           question,
           retrievalResult.chunks,
           safeHistory,
           answerMode
         );
-
         for await (const textDelta of generator) {
           controller.enqueue(line({ type: 'chunk', text: textDelta }));
         }
-      } catch (streamErr: any) {
-        // Stream failed — try non-streaming fallback
-        console.warn('Streaming failed, falling back to non-streaming:', streamErr.message);
+      } catch (streamErr: unknown) {
+        streamFailed = true;
+        console.warn('Streaming failed, falling back:', (streamErr as Error).message);
         try {
           const fullAnswer = await generateGroundedAnswer(
             question,
@@ -107,28 +104,41 @@ export async function POST(request: Request) {
             answerMode
           );
           controller.enqueue(line({ type: 'chunk', text: fullAnswer }));
-        } catch (fallbackErr: any) {
-          console.error('Both streaming and fallback generation failed:', fallbackErr.message);
+        } catch (fallbackErr: unknown) {
+          console.error('Both streaming and fallback failed:', (fallbackErr as Error).message);
           controller.enqueue(
             line({ type: 'error', message: 'The AI service is temporarily unavailable. Please try again.' })
           );
-          controller.enqueue(line(metaPayload));
+          // Still resolve followups so meta is consistent
+          const followups = await followupsPromise;
+          controller.enqueue(line({
+            type: 'meta', sources, found: retrievalResult.found,
+            topScore: retrievalResult.topScore, mode: answerMode, followups,
+          }));
           controller.close();
           return;
         }
       }
 
-      // Always emit the meta line last so the client knows sources
-      controller.enqueue(line(metaPayload));
+      // By now follow-ups are almost certainly ready (generation took longer)
+      const followups = await followupsPromise;
+
+      controller.enqueue(line({
+        type: 'meta',
+        sources,
+        found: retrievalResult.found,
+        topScore: retrievalResult.topScore,
+        mode: answerMode,
+        followups,
+        _streamFailed: streamFailed, // debug flag, stripped by client
+      }));
       controller.close();
     },
   });
 
   return new Response(stream, {
     headers: {
-      // text/plain so Next.js does not try to JSON-parse the body
       'Content-Type': 'text/plain; charset=utf-8',
-      // Prevent buffering by proxies / nginx
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'no-cache, no-store',
     },
