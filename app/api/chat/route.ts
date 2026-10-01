@@ -81,8 +81,6 @@ export async function POST(request: Request) {
       // generateFollowups() never throws; returns [] on any failure.
       const followupsPromise = generateFollowups(question);
 
-      let streamFailed = false;
-
       try {
         const generator = streamGroundedAnswer(
           question,
@@ -94,8 +92,7 @@ export async function POST(request: Request) {
           controller.enqueue(line({ type: 'chunk', text: textDelta }));
         }
       } catch (streamErr: unknown) {
-        streamFailed = true;
-        console.warn('Streaming failed, falling back:', (streamErr as Error).message);
+        console.warn('Streaming failed, falling back to non-streaming:', (streamErr as Error).message);
         try {
           const fullAnswer = await generateGroundedAnswer(
             question,
@@ -130,7 +127,6 @@ export async function POST(request: Request) {
         topScore: retrievalResult.topScore,
         mode: answerMode,
         followups,
-        _streamFailed: streamFailed, // debug flag, stripped by client
       }));
       controller.close();
     },

@@ -217,15 +217,16 @@ export async function generateGroundedAnswer(
         config: { systemInstruction: RAG_SYSTEM_INSTRUCTION },
       });
       return response.text || 'I could not generate an answer at this time. Please try again.';
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { status?: number; message?: string };
       const isRetryable =
-        error.status === 503 || error.status === 429 ||
-        (error.message && (error.message.includes('503') || error.message.includes('429')));
+        err.status === 503 || err.status === 429 ||
+        (typeof err.message === 'string' && (err.message.includes('503') || err.message.includes('429')));
 
       if (isRetryable && attempt < MAX_RETRIES - 1) {
         attempt++;
         const backoffMs = Math.pow(2, attempt) * 1000;
-        console.warn(`Gemini API ${error.status} — retrying in ${backoffMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        console.warn(`Gemini API ${err.status ?? 'error'} — retrying in ${backoffMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await delay(backoffMs);
       } else {
         console.error('Gemini generation error:', error);
@@ -275,15 +276,16 @@ export async function* streamGroundedAnswer(
         if (text) yield text;
       }
       return; // stream completed successfully — stop retry loop
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const err = error as { status?: number; message?: string };
       const isRetryable =
-        error.status === 503 || error.status === 429 ||
-        (error.message && (error.message.includes('503') || error.message.includes('429')));
+        err.status === 503 || err.status === 429 ||
+        (typeof err.message === 'string' && (err.message.includes('503') || err.message.includes('429')));
 
       if (isRetryable && attempt < MAX_RETRIES - 1) {
         attempt++;
         const backoffMs = Math.pow(2, attempt) * 2000;
-        console.warn(`Gemini stream API ${error.status} — retrying in ${backoffMs}ms`);
+        console.warn(`Gemini stream API ${err.status ?? 'error'} — retrying in ${backoffMs}ms`);
         await delay(backoffMs);
       } else {
         throw error;

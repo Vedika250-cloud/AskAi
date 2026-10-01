@@ -172,7 +172,7 @@ function SourcePanel({ sources, found }: { sources: SourceRef[]; found: boolean 
               </div>
               {expanded && src.excerpt && (
                 <p className="mt-1 text-[11px] text-neutral-500 leading-relaxed italic border-l-2 border-neutral-300 pl-2">
-                  "{src.excerpt}{src.excerpt.length >= 150 ? '…' : ''}"
+                  &ldquo;{src.excerpt}{src.excerpt.length >= 150 ? '…' : ''}&rdquo;
                 </p>
               )}
             </div>
@@ -197,6 +197,130 @@ function LogoMark({ size = 28 }: { size?: number }) {
       >
         A
       </span>
+    </div>
+  );
+}
+
+// ─── Sidebar Component (declared outside Home to maintain stable identity) ──
+
+interface SidebarProps {
+  sessions: ChatSession[];
+  selectedMode: AnswerMode;
+  onSelectMode: (mode: AnswerMode) => void;
+  onNewChat: () => void;
+  onLoadSession: (session: ChatSession) => void;
+}
+
+function Sidebar({
+  sessions,
+  selectedMode,
+  onSelectMode,
+  onNewChat,
+  onLoadSession,
+}: SidebarProps) {
+  return (
+    <div className="flex flex-col h-full">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5 px-4 py-4 border-b border-neutral-200">
+        <LogoMark size={28} />
+        <div>
+          <p className="text-sm font-semibold text-neutral-900 leading-none">AskAI</p>
+          <p className="text-[10px] text-neutral-400 mt-0.5 leading-none">Academic Assistant</p>
+        </div>
+      </div>
+
+      {/* New Chat */}
+      <div className="px-3 pt-3">
+        <button
+          onClick={onNewChat}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-neutral-700 bg-white border border-neutral-200 hover:bg-neutral-50 hover:border-neutral-300 transition-colors"
+        >
+          <Plus size={14} className="text-neutral-500" />
+          New Chat
+        </button>
+      </div>
+
+      {/* Recent Conversations */}
+      <div className="px-3 pt-4 flex-1 overflow-y-auto min-h-0">
+        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-1.5 px-1">
+          Recent
+        </p>
+        {sessions.length === 0 ? (
+          <p className="text-xs text-neutral-400 px-1 py-1">No recent chats yet</p>
+        ) : (
+          <ul className="space-y-0.5">
+            {sessions.map(session => (
+              <li key={session.id}>
+                <button
+                  onClick={() => onLoadSession(session)}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 transition-colors group"
+                >
+                  <MessageSquare size={12} className="text-neutral-400 flex-shrink-0 group-hover:text-neutral-600" />
+                  <span className="truncate">{session.title}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Response Mode */}
+      <div className="px-3 pt-3 pb-2 border-t border-neutral-200">
+        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2 px-1">
+          Response Mode
+        </p>
+        <ul className="space-y-0.5">
+          {ANSWER_MODES.map(mode => {
+            const Icon = mode.icon;
+            const active = selectedMode === mode.id;
+            return (
+              <li key={mode.id}>
+                <button
+                  onClick={() => onSelectMode(mode.id)}
+                  className={cn(
+                    'w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-left text-xs transition-colors',
+                    active
+                      ? 'bg-neutral-900 text-white'
+                      : 'text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900'
+                  )}
+                >
+                  <Icon size={12} className={active ? 'text-white' : 'text-neutral-400'} />
+                  <span className="font-medium">{mode.label}</span>
+                  {active && <Check size={10} className="ml-auto text-neutral-300" />}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {/* Course Topics */}
+      <div className="px-3 pt-3 pb-4 border-t border-neutral-200">
+        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2 px-1">
+          Course Topics
+        </p>
+        <ul className="space-y-0.5">
+          {COURSE_TOPICS.map(topic => (
+            <li key={topic}>
+              <div className="flex items-center gap-2 px-2 py-1 rounded-md text-xs text-neutral-500">
+                <BookMarked size={11} className="text-neutral-300 flex-shrink-0" />
+                <span className="truncate">{topic}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Knowledge Base link */}
+      <div className="px-3 pb-4 border-t border-neutral-200 pt-3 mt-auto">
+        <Link
+          href="/knowledge"
+          className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 transition-colors w-full"
+        >
+          <Library size={12} className="text-neutral-400 flex-shrink-0" />
+          <span>Course Knowledge Base</span>
+        </Link>
+      </div>
     </div>
   );
 }
@@ -298,8 +422,8 @@ export default function Home() {
     setIsLoading(true);
     setIsStreaming(false);
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: textToSend };
-    const aiMsgId = (Date.now() + 1).toString();
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: textToSend };
+    const aiMsgId = crypto.randomUUID();
 
     setMessages(prev => [...prev, userMsg]);
 
@@ -388,115 +512,6 @@ export default function Home() {
     }
   };
 
-  // ─── Sidebar Content (reused for desktop + mobile) ─────────────────────────
-
-  const SidebarContent = () => (
-    <div className="flex flex-col h-full">
-
-      {/* Logo */}
-      <div className="flex items-center gap-2.5 px-4 py-4 border-b border-neutral-200">
-        <LogoMark size={28} />
-        <div>
-          <p className="text-sm font-semibold text-neutral-900 leading-none">AskAI</p>
-          <p className="text-[10px] text-neutral-400 mt-0.5 leading-none">Academic Assistant</p>
-        </div>
-      </div>
-
-      {/* New Chat */}
-      <div className="px-3 pt-3">
-        <button
-          onClick={startNewChat}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-neutral-700 bg-white border border-neutral-200 hover:bg-neutral-50 hover:border-neutral-300 transition-colors"
-        >
-          <Plus size={14} className="text-neutral-500" />
-          New Chat
-        </button>
-      </div>
-
-      {/* Recent Conversations */}
-      <div className="px-3 pt-4 flex-1 overflow-y-auto min-h-0">
-        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-1.5 px-1">
-          Recent
-        </p>
-        {sessions.length === 0 ? (
-          <p className="text-xs text-neutral-400 px-1 py-1">No recent chats yet</p>
-        ) : (
-          <ul className="space-y-0.5">
-            {sessions.map(session => (
-              <li key={session.id}>
-                <button
-                  onClick={() => loadSession(session)}
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left text-xs text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 transition-colors group"
-                >
-                  <MessageSquare size={12} className="text-neutral-400 flex-shrink-0 group-hover:text-neutral-600" />
-                  <span className="truncate">{session.title}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* Response Mode */}
-      <div className="px-3 pt-3 pb-2 border-t border-neutral-200">
-        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2 px-1">
-          Response Mode
-        </p>
-        <ul className="space-y-0.5">
-          {ANSWER_MODES.map(mode => {
-            const Icon = mode.icon;
-            const active = selectedMode === mode.id;
-            return (
-              <li key={mode.id}>
-                <button
-                  onClick={() => setSelectedMode(mode.id)}
-                  className={cn(
-                    'w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-left text-xs transition-colors',
-                    active
-                      ? 'bg-neutral-900 text-white'
-                      : 'text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900'
-                  )}
-                >
-                  <Icon size={12} className={active ? 'text-white' : 'text-neutral-400'} />
-                  <span className="font-medium">{mode.label}</span>
-                  {active && <Check size={10} className="ml-auto text-neutral-300" />}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-
-      {/* Course Topics */}
-      <div className="px-3 pt-3 pb-4 border-t border-neutral-200">
-        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2 px-1">
-          Course Topics
-        </p>
-        <ul className="space-y-0.5">
-          {COURSE_TOPICS.map(topic => (
-            <li key={topic}>
-              <div className="flex items-center gap-2 px-2 py-1 rounded-md text-xs text-neutral-500">
-                <BookMarked size={11} className="text-neutral-300 flex-shrink-0" />
-                <span className="truncate">{topic}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      {/* Knowledge Base link */}
-      <div className="px-3 pb-4 border-t border-neutral-200 pt-3 mt-auto">
-        <Link
-          href="/knowledge"
-          className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 transition-colors w-full"
-        >
-          <Library size={12} className="text-neutral-400 flex-shrink-0" />
-          <span>Course Knowledge Base</span>
-        </Link>
-      </div>
-    </div>
-  );
-
   // ─── JSX ───────────────────────────────────────────────────────────────────
 
   return (
@@ -504,7 +519,13 @@ export default function Home() {
 
       {/* ── Desktop Sidebar ─────────────────────────────────────────────── */}
       <aside className="hidden md:flex flex-col w-60 shrink-0 border-r border-neutral-200 bg-stone-50">
-        <SidebarContent />
+        <Sidebar
+          sessions={sessions}
+          selectedMode={selectedMode}
+          onSelectMode={setSelectedMode}
+          onNewChat={startNewChat}
+          onLoadSession={loadSession}
+        />
       </aside>
 
       {/* ── Mobile Sidebar Overlay ──────────────────────────────────────── */}
@@ -528,7 +549,13 @@ export default function Home() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <SidebarContent />
+              <Sidebar
+                sessions={sessions}
+                selectedMode={selectedMode}
+                onSelectMode={setSelectedMode}
+                onNewChat={startNewChat}
+                onLoadSession={loadSession}
+              />
             </div>
           </aside>
         </div>

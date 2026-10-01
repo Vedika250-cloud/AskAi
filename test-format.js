@@ -1,1 +1,0 @@
-const { GoogleGenAI } = require('@google/genai'); const ai = new GoogleGenAI({ apiKey: 'fake-key' }); ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [{ wrong: 'format' }] }).catch(console.error);

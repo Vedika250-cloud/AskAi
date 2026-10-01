@@ -11,7 +11,9 @@
     "generate-embeddings": "node scripts/generate-embeddings.js",
     "rebuild-embeddings": "node scripts/generate-embeddings.js --rebuild",
     "test-retrieval": "node scripts/test-retrieval.js",
-    "test-rag": "node scripts/test-rag.js"
+    "test-rag": "node scripts/test-rag.js",
+    "eval": "node scripts/eval-retrieval.js",
+    "eval-charts": "python scripts/eval-charts.py"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

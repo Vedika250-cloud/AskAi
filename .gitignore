@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# AskAI generated data — large files, not for source control
+# Re-generate with: npm run process-docs && npm run generate-embeddings
+data/embeddings.json
+data/processed_chunks.json
+data/eval_results.json
+data/eval_charts/
