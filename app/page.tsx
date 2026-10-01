@@ -14,7 +14,11 @@ import {
   BookOpen, 
   GraduationCap, 
   HelpCircle,
-  Check
+  Check,
+  FileText,
+  ChevronDown,
+  ChevronUp,
+  AlertTriangle,
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -69,27 +73,124 @@ const ANSWER_MODES: ModeOption[] = [
   },
 ];
 
+// Source reference exactly as returned by the retrieval system
+export type SourceRef = {
+  source: string;
+  page: number;
+  similarity: number;
+  chunk_id: string;
+  excerpt: string;
+};
+
 type Message = {
   id: string;
   role: 'user' | 'ai';
   content: string;
   mode?: AnswerMode;
+  // Retrieval-system sources — undefined until response arrives
+  sources?: SourceRef[];
+  // Whether retrieval found relevant course material
+  found?: boolean;
 };
+
+// ─── Source Panel Component ────────────────────────────────────────────────────
+// Renders the retrieval-system sources for one AI response.
+// Sources come exclusively from the retrieval layer — never invented by Gemini.
+
+function SourcePanel({
+  sources,
+  found,
+}: {
+  sources: SourceRef[];
+  found: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // "Not found" case — course material was searched but nothing was relevant
+  if (!found || sources.length === 0) {
+    return (
+      <div className="mt-3 flex items-start gap-2 px-3.5 py-2.5 rounded-xl border border-amber-200 bg-amber-50/60 text-amber-800">
+        <AlertTriangle size={14} className="flex-shrink-0 mt-0.5 text-amber-500" />
+        <p className="text-xs leading-relaxed">
+          <span className="font-semibold">No course material found</span> — this answer is based on general knowledge. 
+          Your indexed course documents did not contain a sufficiently relevant match for this question.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/50 overflow-hidden">
+      {/* Header row */}
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex items-center justify-between px-3.5 py-2 hover:bg-emerald-100/60 transition-colors text-left"
+      >
+        <div className="flex items-center gap-2">
+          <FileText size={13} className="text-emerald-600 flex-shrink-0" />
+          <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">
+            Based on your course material
+          </span>
+          <span className="text-[11px] text-emerald-600 font-normal">
+            · {sources.length} source{sources.length !== 1 ? 's' : ''} retrieved
+          </span>
+        </div>
+        {expanded
+          ? <ChevronUp size={13} className="text-emerald-600 flex-shrink-0" />
+          : <ChevronDown size={13} className="text-emerald-600 flex-shrink-0" />
+        }
+      </button>
+
+      {/* Always-visible compact source list */}
+      <div className="px-3.5 pb-2.5 space-y-1.5">
+        {sources.map((src, i) => (
+          <div key={src.chunk_id} className="flex items-start gap-2">
+            <span className="flex-shrink-0 mt-0.5 w-4 h-4 rounded-full bg-emerald-200 text-emerald-800 text-[9px] font-bold flex items-center justify-center">
+              {i + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-1.5 flex-wrap">
+                <span className="text-[12px] font-semibold text-gray-800 break-all leading-snug">
+                  {src.source}
+                </span>
+                <span className="text-[11px] text-emerald-700 font-medium whitespace-nowrap">
+                  — Page {src.page}
+                </span>
+              </div>
+
+              {/* Excerpt — shown when panel is expanded */}
+              {expanded && src.excerpt && (
+                <p className="mt-1 text-[11px] text-gray-500 leading-relaxed italic border-l-2 border-emerald-300 pl-2">
+                  "{src.excerpt}{src.excerpt.length >= 150 ? '…' : ''}"
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function Home() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [selectedMode, setSelectedMode] = useState<AnswerMode>('detailed');
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);    // true = waiting for first token
+  const [isStreaming, setIsStreaming] = useState(false); // true = tokens arriving
   const [error, setError] = useState<string | null>(null);
-  
+
+  // Ref to abort the active fetch when user starts a new question or unmounts
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, isStreaming]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -100,9 +201,13 @@ export default function Home() {
   }, [input]);
 
   const startNewChat = () => {
+    // Cancel any in-progress stream
+    abortControllerRef.current?.abort();
     setMessages([]);
     setError(null);
     setInput('');
+    setIsLoading(false);
+    setIsStreaming(false);
     setTimeout(() => inputRef.current?.focus(), 100);
   };
 
@@ -112,7 +217,12 @@ export default function Home() {
     const textToSend = (overrideText || input).trim();
     const modeToSend = overrideMode || selectedMode;
 
-    if (!textToSend || isLoading) return;
+    if (!textToSend || isLoading || isStreaming) return;
+
+    // Cancel any previous in-flight request
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     // Capture the current conversation history to send to backend
     const currentHistory = messages.map(m => ({ role: m.role, content: m.content }));
@@ -120,45 +230,125 @@ export default function Home() {
     setInput('');
     setError(null);
     setIsLoading(true);
+    setIsStreaming(false);
 
-    const newUserMsg: Message = { 
-      id: Date.now().toString(), 
-      role: 'user', 
-      content: textToSend 
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: textToSend,
     };
-    setMessages((prev) => [...prev, newUserMsg]);
+
+    // Unique ID for the AI placeholder — we update it in place as chunks arrive
+    const aiMsgId = (Date.now() + 1).toString();
+
+    setMessages(prev => [...prev, userMsg]);
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          message: textToSend, 
-          history: currentHistory,
-          mode: modeToSend,
-        }),
+        body: JSON.stringify({ message: textToSend, history: currentHistory, mode: modeToSend }),
+        signal: controller.signal,
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch response');
+        // Non-streaming error path (e.g. 400/500 before the stream starts)
+        const data = await response.json().catch(() => ({}));
+        throw new Error((data as any).error || `Server error: ${response.status}`);
       }
 
-      const aiMsg: Message = { 
-        id: (Date.now() + 1).toString(), 
-        role: 'ai', 
-        content: data.answer,
-        mode: modeToSend,
+      if (!response.body) {
+        throw new Error('No response body received.');
+      }
+
+      // ── Insert empty AI placeholder so it appears immediately ──────────────
+      setMessages(prev => [
+        ...prev,
+        { id: aiMsgId, role: 'ai', content: '', mode: modeToSend },
+      ]);
+      setIsLoading(false);
+      setIsStreaming(true);
+
+      // ── Read NDJSON lines from the stream ──────────────────────────────────
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let lineBuffer = '';
+
+      const processLine = (rawLine: string) => {
+        const trimmed = rawLine.trim();
+        if (!trimmed) return;
+
+        let parsed: { type: string; text?: string; sources?: SourceRef[]; found?: boolean; mode?: string; message?: string };
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          // Malformed line — ignore
+          return;
+        }
+
+        if (parsed.type === 'chunk' && parsed.text) {
+          // Append delta to the placeholder message
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === aiMsgId ? { ...m, content: m.content + parsed.text! } : m
+            )
+          );
+        } else if (parsed.type === 'meta') {
+          // Apply sources once generation is complete
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === aiMsgId
+                ? { ...m, sources: parsed.sources ?? [], found: parsed.found ?? false }
+                : m
+            )
+          );
+        } else if (parsed.type === 'error') {
+          setError(parsed.message || 'An AI error occurred.');
+          // Remove the empty placeholder
+          setMessages(prev => prev.filter(m => m.id !== aiMsgId));
+        }
       };
-      setMessages((prev) => [...prev, aiMsg]);
+
+      while (true) {
+        const { value, done } = await reader.read();
+
+        if (done) break;
+
+        lineBuffer += decoder.decode(value, { stream: true });
+
+        // Process all complete lines in the buffer
+        const newlineIdx = lineBuffer.lastIndexOf('\n');
+        if (newlineIdx !== -1) {
+          const completeLines = lineBuffer.slice(0, newlineIdx + 1).split('\n');
+          lineBuffer = lineBuffer.slice(newlineIdx + 1);
+          for (const l of completeLines) processLine(l);
+        }
+      }
+
+      // Flush any remaining partial line
+      if (lineBuffer.trim()) processLine(lineBuffer);
+
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+        // User cancelled — leave whatever text was streamed in place
+        return;
+      }
       console.error('Chat error:', err);
       setError(err.message || 'An error occurred while communicating with the AI.');
+      // Clean up empty placeholder if nothing was streamed
+      setMessages(prev => {
+        const placeholder = prev.find(m => m.id === aiMsgId);
+        if (placeholder && !placeholder.content) {
+          return prev.filter(m => m.id !== aiMsgId);
+        }
+        return prev;
+      });
     } finally {
       setIsLoading(false);
+      setIsStreaming(false);
     }
   };
+
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -296,7 +486,7 @@ export default function Home() {
                 const modeMeta = msg.mode ? ANSWER_MODES.find(m => m.id === msg.mode) : null;
                 const ModeIcon = modeMeta?.icon;
 
-                return (
+                  return (
                   <div
                     key={msg.id}
                     className={cn(
@@ -310,46 +500,61 @@ export default function Home() {
                     )}>
                       {msg.role === 'user' ? <User size={16} /> : <Bot size={16} />}
                     </div>
-                    
-                    <div className={cn(
-                      "max-w-[90%] sm:max-w-[80%] rounded-2xl px-5 py-4 shadow-sm",
-                      msg.role === 'user' 
-                        ? "bg-gray-800 text-white rounded-tr-none" 
-                        : "bg-white border border-gray-200 text-gray-800 rounded-tl-none"
-                    )}>
-                      {/* Mode Badge on AI responses */}
-                      {msg.role === 'ai' && modeMeta && (
-                        <div className="flex items-center gap-1.5 mb-2.5 pb-2 border-b border-gray-100">
-                          {ModeIcon && <ModeIcon size={13} className="text-blue-600" />}
-                          <span className="text-[11px] font-semibold text-gray-700">
-                            {modeMeta.label}
-                          </span>
-                          <span className="text-[10px] text-gray-400">·</span>
-                          <span className="text-[10px] text-gray-500 font-normal">
-                            {modeMeta.badge}
-                          </span>
-                        </div>
-                      )}
 
-                      {msg.role === 'user' ? (
-                        <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{msg.content}</p>
-                      ) : (
-                        <div className="prose prose-sm sm:prose-base prose-blue max-w-none break-words
-                            prose-pre:bg-gray-50 prose-pre:text-gray-800 prose-pre:border prose-pre:border-gray-200
-                            prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none
-                            prose-p:leading-relaxed prose-headings:font-bold prose-headings:text-gray-900"
-                        >
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {msg.content}
-                          </ReactMarkdown>
-                        </div>
+                    {/* Bubble + Source Panel stacked vertically for AI */}
+                    <div className={cn(
+                      "flex flex-col min-w-0",
+                      msg.role === 'user' ? "max-w-[90%] sm:max-w-[80%]" : "max-w-[90%] sm:max-w-[80%]"
+                    )}>
+                      {/* The answer bubble */}
+                      <div className={cn(
+                        "rounded-2xl px-5 py-4 shadow-sm",
+                        msg.role === 'user'
+                          ? "bg-gray-800 text-white rounded-tr-none"
+                          : "bg-white border border-gray-200 text-gray-800 rounded-tl-none"
+                      )}>
+                        {/* Mode Badge on AI responses */}
+                        {msg.role === 'ai' && modeMeta && (
+                          <div className="flex items-center gap-1.5 mb-2.5 pb-2 border-b border-gray-100">
+                            {ModeIcon && <ModeIcon size={13} className="text-blue-600" />}
+                            <span className="text-[11px] font-semibold text-gray-700">
+                              {modeMeta.label}
+                            </span>
+                            <span className="text-[10px] text-gray-400">·</span>
+                            <span className="text-[10px] text-gray-500 font-normal">
+                              {modeMeta.badge}
+                            </span>
+                          </div>
+                        )}
+
+                        {msg.role === 'user' ? (
+                          <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{msg.content}</p>
+                        ) : (
+                          <div className="prose prose-sm sm:prose-base prose-blue max-w-none break-words
+                              prose-pre:bg-gray-50 prose-pre:text-gray-800 prose-pre:border prose-pre:border-gray-200
+                              prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none
+                              prose-p:leading-relaxed prose-headings:font-bold prose-headings:text-gray-900"
+                          >
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                              {msg.content}
+                            </ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Source Panel — shown below every AI answer, visually separate */}
+                      {msg.role === 'ai' && msg.sources !== undefined && (
+                        <SourcePanel
+                          sources={msg.sources}
+                          found={msg.found ?? false}
+                        />
                       )}
                     </div>
                   </div>
                 );
               })}
               
-              {/* Loading State */}
+              {/* Thinking indicator — shown while retrieval + first token are pending */}
               {isLoading && (
                 <div className="flex gap-3 sm:gap-4 flex-row animate-in fade-in duration-300">
                   <div className="flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-full shadow-sm mt-1 bg-blue-600 text-white">
@@ -362,11 +567,12 @@ export default function Home() {
                       <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                     </div>
                     <span className="text-xs text-gray-500 font-medium">
-                      Retrieving course slides & generating {currentModeConfig.label.toLowerCase()}...
+                      Searching course materials · preparing {currentModeConfig.label.toLowerCase()}…
                     </span>
                   </div>
                 </div>
               )}
+
               
               {/* Error State */}
               {error && (
@@ -429,25 +635,32 @@ export default function Home() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={`Ask a course question in "${currentModeConfig.label}" style...`}
-              disabled={isLoading}
+              placeholder={
+                isLoading ? 'Searching course materials…' :
+                isStreaming ? 'Receiving response…' :
+                `Ask a course question in "${currentModeConfig.label}" style…`
+              }
+              disabled={isLoading || isStreaming}
               rows={1}
               className="w-full max-h-48 py-3.5 pl-4 pr-12 bg-transparent border-none focus:outline-none focus:ring-0 resize-none text-[15px] leading-relaxed disabled:opacity-50"
             />
             <div className="absolute right-2 bottom-2">
               <button
                 onClick={() => sendMessage()}
-                disabled={!input.trim() || isLoading}
+                disabled={!input.trim() || isLoading || isStreaming}
                 className="flex items-center justify-center w-9 h-9 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors shadow-sm cursor-pointer disabled:cursor-not-allowed"
                 aria-label="Send message"
               >
-                <Send size={16} className={input.trim() && !isLoading ? "translate-x-0.5 -translate-y-0.5" : ""} />
+                {isStreaming
+                  ? <Loader2 size={16} className="animate-spin" />
+                  : <Send size={16} className={input.trim() && !isLoading ? 'translate-x-0.5 -translate-y-0.5' : ''} />
+                }
               </button>
             </div>
           </div>
 
           <div className="flex items-center justify-between text-[11px] text-gray-400 px-1">
-            <span>AskAI retrieves from course materials & answers using prompt-engineered study styles.</span>
+            <span>AskAI retrieves from course materials &amp; answers using prompt-engineered study styles.</span>
             <span className="hidden sm:inline">Press Enter to send, Shift+Enter for new line</span>
           </div>
 

@@ -82,8 +82,8 @@ export const ANSWER_MODES: Record<AnswerMode, AnswerModeConfig> = {
 
 /**
  * System instruction provided to Gemini for Grounded RAG Generation.
- * Enforces strict grounding, student-friendly tone, clear source citations,
- * and prohibition of hallucinations or fabricated sources.
+ * Sources are handled structurally by the API layer — Gemini must NOT
+ * generate or fabricate a sources list. It writes the answer body only.
  */
 export const RAG_SYSTEM_INSTRUCTION = `You are AskAI, a knowledgeable, clear, and supportive academic assistant for students.
 
@@ -101,16 +101,10 @@ CORE BEHAVIOR RULES:
    - When helpful for educational clarity, or when course materials do not cover the topic, you may provide a simple, accurate explanation using general computer science/AI knowledge.
    - However, you MUST clearly distinguish general knowledge from course material (for example, by stating: "Note: Beyond what is covered in your course slides..." or "From general knowledge:").
 
-4. Citations & Sources:
-   - NEVER fabricate, invent, or guess a source or page number.
-   - Only cite sources and page numbers that appear in the provided context and directly supported your answer.
-   - Whenever course material is used, conclude your response with a dedicated sources section formatted EXACTLY as follows:
-
-📚 Sources:
-* <filename> — Page <number>
-
-   - Consolidate duplicates where appropriate (e.g. "* Deep_Learning.pdf — Page 7, 8" or distinct bullet points).
-   - If no course materials were relevant or used, do NOT output fake sources; state that no course sources were matched.
+4. No Source Lists:
+   - Do NOT write a "📚 Sources:" section or any source/citation list in your response.
+   - Sources are displayed separately and automatically by the application. Your job is the answer body only.
+   - NEVER fabricate, invent, or mention a source filename or page number in your answer text.
 
 5. Student-Friendly Tone:
    - Keep answers well-structured, easy to understand, encouraging, and engaging.
@@ -125,7 +119,7 @@ CORE BEHAVIOR RULES:
 /**
  * Constructs the grounded user prompt containing the student's question,
  * the retrieved course material chunks, and the selected answer mode instructions.
- * 
+ *
  * @param question - The student's question.
  * @param chunks - Array of retrieved course material chunks.
  * @param mode - The selected answer mode (default: 'detailed').
@@ -149,7 +143,7 @@ TASK INSTRUCTIONS:
 ${modeConfig.instruction}
 
 ADDITIONAL RULE:
-Inform the student that their current course materials do not appear to cover this topic. You may provide your response using general knowledge, but explicitly state that this explanation is based on general knowledge rather than their specific course materials. Do not cite any course documents under sources.`;
+Inform the student that their current course materials do not appear to cover this topic. You may provide a response using general knowledge, but clearly state that this explanation is based on general knowledge — not their specific course materials. Do NOT write a sources list.`;
   }
 
   const contextBlocks = chunks.map((chunk, index) => {
@@ -172,21 +166,34 @@ ${contextBlocks}
 TASK INSTRUCTIONS:
 ${modeConfig.instruction}
 
-GROUNDING & CITATION RULES:
+GROUNDING RULES:
 1. Answer primarily using the excerpted course material above, tailored to the requested RESPONSE STYLE.
-2. If course material is partial, you may supplement with general knowledge but explicitly distinguish it.
-3. Conclude your response with the '📚 Sources:' block citing the specific sources and pages that were used.`;
+2. If course material is partial, supplement with general knowledge but explicitly distinguish it.
+3. Do NOT write a "📚 Sources:" section — sources are shown separately by the application.`;
 }
 
+// ─── Shared helper: build the Gemini contents array ────────────────────────────
+
+function buildContents(
+  question: string,
+  chunks: RetrievedChunk[],
+  history: { role: string; content: string }[],
+  mode: AnswerMode
+) {
+  const groundedPrompt = constructRAGPrompt(question, chunks, mode);
+  const contents = history.map((msg) => ({
+    role: msg.role === 'ai' ? 'model' : 'user',
+    parts: [{ text: msg.content }],
+  }));
+  contents.push({ role: 'user', parts: [{ text: groundedPrompt }] });
+  return contents;
+}
+
+// ─── Non-streaming generation (kept as reliable fallback) ─────────────────────
+
 /**
- * Generates a grounded RAG response for a student question using retrieved course chunks
- * tailored to the requested answer mode.
- * 
- * @param question - The student's question.
- * @param chunks - Retrieved course material chunks.
- * @param history - Conversation history for multi-turn chat context.
- * @param mode - The selected answer mode (default: 'detailed').
- * @returns The final grounded answer including formatted source citations.
+ * Generates a complete grounded RAG response in one request.
+ * Retries up to 3 times on transient 503/429 errors with exponential backoff.
  */
 export async function generateGroundedAnswer(
   question: string,
@@ -198,21 +205,7 @@ export async function generateGroundedAnswer(
     throw new Error('Question cannot be empty.');
   }
 
-  // Construct the grounded prompt with course context and mode instructions
-  const groundedPrompt = constructRAGPrompt(question, chunks, mode);
-
-  // Map conversation history
-  const contents = history.map((msg) => ({
-    role: msg.role === 'ai' ? 'model' : 'user',
-    parts: [{ text: msg.content }],
-  }));
-
-  // Append current turn with grounded context and mode instructions
-  contents.push({
-    role: 'user',
-    parts: [{ text: groundedPrompt }],
-  });
-
+  const contents = buildContents(question, chunks, history, mode);
   const MAX_RETRIES = 3;
   let attempt = 0;
 
@@ -220,21 +213,19 @@ export async function generateGroundedAnswer(
     try {
       const response = await ai.models.generateContent({
         model: GEMINI_MODEL,
-        contents: contents,
-        config: {
-          systemInstruction: RAG_SYSTEM_INSTRUCTION,
-        },
+        contents,
+        config: { systemInstruction: RAG_SYSTEM_INSTRUCTION },
       });
-
       return response.text || 'I could not generate an answer at this time. Please try again.';
     } catch (error: any) {
-      const isUnavailable = error.status === 503 || (error.message && error.message.includes('503'));
-      const isRateLimit = error.status === 429 || (error.message && error.message.includes('429'));
+      const isRetryable =
+        error.status === 503 || error.status === 429 ||
+        (error.message && (error.message.includes('503') || error.message.includes('429')));
 
-      if ((isUnavailable || isRateLimit) && attempt < MAX_RETRIES - 1) {
+      if (isRetryable && attempt < MAX_RETRIES - 1) {
         attempt++;
         const backoffMs = Math.pow(2, attempt) * 1000;
-        console.warn(`Gemini API ${error.status || 'spike'} error. Retrying in ${backoffMs}ms... (Attempt ${attempt + 1}/${MAX_RETRIES})`);
+        console.warn(`Gemini API ${error.status} — retrying in ${backoffMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await delay(backoffMs);
       } else {
         console.error('Gemini generation error:', error);
@@ -243,11 +234,66 @@ export async function generateGroundedAnswer(
     }
   }
 
-  return 'I am unable to answer right now due to a temporary service issue. Please try again in a few moments.';
+  return 'I am unable to answer right now due to a temporary service issue. Please try again.';
+}
+
+// ─── Streaming generation ──────────────────────────────────────────────────────
+
+/**
+ * Streams a grounded RAG response as an AsyncGenerator of text chunks.
+ *
+ * Each yielded string is a raw text delta from the Gemini stream.
+ * The caller assembles the full answer from deltas.
+ *
+ * Retries once on transient 503/429 before propagating the error.
+ * Uses ai.models.generateContentStream() from @google/genai v2.24.0.
+ */
+export async function* streamGroundedAnswer(
+  question: string,
+  chunks: RetrievedChunk[],
+  history: { role: string; content: string }[] = [],
+  mode: AnswerMode = 'detailed'
+): AsyncGenerator<string> {
+  if (!question || question.trim() === '') {
+    throw new Error('Question cannot be empty.');
+  }
+
+  const contents = buildContents(question, chunks, history, mode);
+  const MAX_RETRIES = 2;
+  let attempt = 0;
+
+  while (attempt < MAX_RETRIES) {
+    try {
+      const response = await ai.models.generateContentStream({
+        model: GEMINI_MODEL,
+        contents,
+        config: { systemInstruction: RAG_SYSTEM_INSTRUCTION },
+      });
+
+      for await (const chunk of response) {
+        const text = chunk.text;
+        if (text) yield text;
+      }
+      return; // stream completed successfully — stop retry loop
+    } catch (error: any) {
+      const isRetryable =
+        error.status === 503 || error.status === 429 ||
+        (error.message && (error.message.includes('503') || error.message.includes('429')));
+
+      if (isRetryable && attempt < MAX_RETRIES - 1) {
+        attempt++;
+        const backoffMs = Math.pow(2, attempt) * 2000;
+        console.warn(`Gemini stream API ${error.status} — retrying in ${backoffMs}ms`);
+        await delay(backoffMs);
+      } else {
+        throw error;
+      }
+    }
+  }
 }
 
 /**
- * Backward compatibility wrapper for standard chat response.
+ * Backward compatibility wrapper for non-streaming chat response.
  */
 export async function generateChatResponse(
   message: string,
