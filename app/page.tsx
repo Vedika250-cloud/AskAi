@@ -483,6 +483,17 @@ export default function Home() {
           ))}
         </ul>
       </div>
+
+      {/* Knowledge Base link */}
+      <div className="px-3 pb-4 border-t border-neutral-200 pt-3 mt-auto">
+        <Link
+          href="/knowledge"
+          className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 transition-colors w-full"
+        >
+          <Library size={12} className="text-neutral-400 flex-shrink-0" />
+          <span>Course Knowledge Base</span>
+        </Link>
+      </div>
     </div>
   );
 
@@ -651,6 +662,28 @@ export default function Home() {
                     {/* Source panel */}
                     {msg.sources !== undefined && (
                       <SourcePanel sources={msg.sources} found={msg.found ?? false} />
+                    )}
+
+                    {/* Follow-up suggestion chips — appear after meta line arrives */}
+                    {msg.followups && msg.followups.length > 0 && (
+                      <div className="mt-4">
+                        <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-widest mb-2">
+                          Follow-up
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {msg.followups.map((q, i) => (
+                            <button
+                              key={i}
+                              onClick={() => sendMessage(q, selectedMode)}
+                              disabled={isBusy}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 bg-white text-xs text-neutral-600 hover:border-neutral-400 hover:text-neutral-900 hover:bg-neutral-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-left"
+                            >
+                              <ArrowRight size={11} className="text-neutral-400 flex-shrink-0" />
+                              {q}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 );
